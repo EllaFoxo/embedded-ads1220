@@ -4,8 +4,10 @@ name = "embedded-ads1220"
 description = "Embedded Driver for the Texas Instruments ADS1220 ADC"
 version = "0.1.0"
 license = "MIT"
+repository = "https://github.com/EllaFoxo/embedded-ads1220"
+readme = "README.md"
 authors = ["Ella Fox <ella@fox.gal>"]
-categories = ["hardware-support"]
+categories = ["embedded", "hardware-support"]
 keywords = ["ads1220", "adc", "embedded-hal", "driver", "analog"]
 
 [lib]
