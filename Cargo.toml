@@ -17,5 +17,6 @@ crate-type = ["lib"]
 defmt = ["dep:defmt"]
 
 [dependencies]
-embedded-hal = { version = "1", default-features = false }
-defmt = { version = "0.3.8", optional = true }
+embedded-hal = { version = "^1.0", default-features = false }
+embedded-hal-async = { version = "^1.0", default-features = false }
+defmt = { version = "^0.3", optional = true }

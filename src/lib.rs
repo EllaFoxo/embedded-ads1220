@@ -1,11 +1,10 @@
 #![no_std]
 #![no_main]
-use embedded_hal::digital::{ErrorType, InputPin};
-use embedded_hal::spi::SpiDevice;
 
 #[cfg(feature = "defmt")]
 use defmt::debug;
-use embedded_hal::delay::DelayNs;
+use embedded_hal::spi::Operation;
+use embedded_hal_async::spi::SpiDevice;
 
 pub const BYTES_PER_SAMPLE: u8 = 4;
 
@@ -113,34 +112,18 @@ pub const VREF_MASK: u8 = (1 << 6) | (1 << 7);
 pub const VREF_INT: u8 = 0 << 6;
 pub const VREF_EXT: u8 = 1 << 6;
 
-pub struct ADS1220<SPI, DR> {
+pub struct ADS1220<SPI: SpiDevice> {
     spi: SPI,
-    dr: DR,
     m_config_reg0: u8,
     m_config_reg1: u8,
     m_config_reg2: u8,
     m_config_reg3: u8,
 }
 
-#[derive(Copy, Clone, Debug)]
-pub enum ADS1220Error<SPI, DR> {
-    Spi(SPI),
-    Dr(DR),
-    // Add other errors for your driver here.
-}
-
-impl<SPI, DR> ADS1220<SPI, DR>
-where
-    SPI: SpiDevice,
-    DR: InputPin,
-{
-    pub fn new(
-        spi: SPI,
-        dr: DR,
-    ) -> Self {
+impl<SPI: SpiDevice> ADS1220<SPI> {
+    pub fn new(spi: SPI) -> Self {
         ADS1220 {
             spi,
-            dr,
             m_config_reg0: 0x00,
             m_config_reg1: 0x00,
             m_config_reg2: 0x00,
@@ -148,42 +131,39 @@ where
         }
     }
 
-    pub fn write_register(&mut self, address: u8, value: u8) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
-        self.spi.write(&[WREG | (address << 2)]).map_err(ADS1220Error::Spi)?;
-        self.spi.write(&mut [value]).map_err(ADS1220Error::Spi)?;
-        Ok(())
+    pub async fn write_register(&mut self, address: u8, value: u8) {
+        self.spi.write(&[WREG | (address << 2)]).await.ok();
+        self.spi.transfer_in_place(&mut [value]).await.ok();
     }
 
-    pub fn read_register(&mut self, address: u8) -> Result<u8, ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn read_register(&mut self, address: u8) -> u8 {
         let mut result: [u8; 1] = [0x00];
-        self.spi.write(&[RREG | (address << 2)]).map_err(ADS1220Error::Spi)?;
-        self.spi.write(&[SPI_MASTER_DUMMY]).map_err(ADS1220Error::Spi)?;
-        self.spi.read(&mut result).map_err(ADS1220Error::Spi)?;
-        Ok(result[0])
+        self.spi.write(&[RREG | (address << 2)]).await.ok();
+        self.spi.transfer(&mut result, &[SPI_MASTER_DUMMY]).await.ok();
+        result[0]
     }
 
-    pub fn begin(&mut self, delay: &mut dyn DelayNs) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
-        self.reset()?;
-        delay.delay_us(50);
+    pub async fn begin(&mut self) {
+        self.reset().await;
+        self.spi.transaction(&mut [Operation::DelayNs(50000)]).await.unwrap();
 
         self.m_config_reg0 = 0x00; // Default settings: AINP=AIN0, AINN=AIN1, Gain 1, PGA enabled
         self.m_config_reg1 = 0x04; // Default settings: DR=20 SPS, Mode=Normal, Conv mode=continuous, Temp Sensor disabled, Current Source off
         self.m_config_reg2 = 0x10; // Default settings: Vref internal, 50/60Hz rejection, power open, IDAC off
         self.m_config_reg3 = 0x00; //  Default settings: IDAC1 disabled, IDAC2 disabled, DRDY pin only
 
-        self.write_register(CONFIG_REG0_ADDRESS, self.m_config_reg0)?;
-        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1)?;
-        self.write_register(CONFIG_REG2_ADDRESS, self.m_config_reg2)?;
-        self.write_register(CONFIG_REG3_ADDRESS, self.m_config_reg3)?;
-        Ok(())
+        self.write_register(CONFIG_REG0_ADDRESS, self.m_config_reg0).await;
+        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1).await;
+        self.write_register(CONFIG_REG2_ADDRESS, self.m_config_reg2).await;
+        self.write_register(CONFIG_REG3_ADDRESS, self.m_config_reg3).await;
     }
 
     #[cfg(feature = "defmt")]
-    pub fn print_register_values(&mut self) {
-        let config_reg0 = self.read_register(CONFIG_REG0_ADDRESS).unwrap();
-        let config_reg1 = self.read_register(CONFIG_REG1_ADDRESS).unwrap();
-        let config_reg2 = self.read_register(CONFIG_REG2_ADDRESS).unwrap();
-        let config_reg3 = self.read_register(CONFIG_REG3_ADDRESS).unwrap();
+    pub async fn print_register_values(&mut self) {
+        let config_reg0 = self.read_register(CONFIG_REG0_ADDRESS).await;
+        let config_reg1 = self.read_register(CONFIG_REG1_ADDRESS).await;
+        let config_reg2 = self.read_register(CONFIG_REG2_ADDRESS).await;
+        let config_reg3 = self.read_register(CONFIG_REG3_ADDRESS).await;
 
         debug!("Config_Reg : ");
         debug!("{:#04X}", config_reg0);
@@ -192,240 +172,243 @@ where
         debug!("{:#04X}", config_reg3);
     }
 
-    pub fn spi_command(&mut self, data: u8) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
-        self.spi.write(&mut [data]).map_err(ADS1220Error::Spi)?;
-        Ok(())
+    pub async fn spi_command(&mut self, data: u8) {
+        self.spi.write(&mut [data]).await.ok();
     }
 
-    pub fn reset(&mut self) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
-        self.spi_command(RESET)
+    pub async fn reset(&mut self) {
+        self.spi_command(RESET).await
     }
 
-    pub fn start_conv(&mut self) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
-        self.spi_command(START)
+    pub async fn start_conv(&mut self) {
+        self.spi_command(START).await
     }
 
-    pub fn select_mux_channels(&mut self, channels_conf: u8) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn select_mux_channels(&mut self, channels_conf: u8) {
         self.m_config_reg0 &= !REG_CONFIG0_MUX_MASK;
         self.m_config_reg0 |= channels_conf;
-        self.write_register(CONFIG_REG0_ADDRESS, self.m_config_reg0)
+        self.write_register(CONFIG_REG0_ADDRESS, self.m_config_reg0).await;
     }
 
-    pub fn set_pga_gain(&mut self, pga_gain: u8) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn set_pga_gain(&mut self, pga_gain: u8) {
         self.m_config_reg0 &= !REG_CONFIG0_PGA_GAIN_MASK;
         self.m_config_reg0 |= pga_gain;
-        self.write_register(CONFIG_REG0_ADDRESS, self.m_config_reg0)
+        self.write_register(CONFIG_REG0_ADDRESS, self.m_config_reg0).await;
     }
 
-    pub fn pga_on(&mut self) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn pga_on(&mut self) {
         self.m_config_reg0 &= !(1 << (0));
-        self.write_register(CONFIG_REG0_ADDRESS, self.m_config_reg0)
+        self.write_register(CONFIG_REG0_ADDRESS, self.m_config_reg0).await;
     }
 
-    pub fn pga_off(&mut self) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn pga_off(&mut self) {
         self.m_config_reg0 |= !(1 << (0));
-        self.write_register(CONFIG_REG0_ADDRESS, self.m_config_reg0)
+        self.write_register(CONFIG_REG0_ADDRESS, self.m_config_reg0).await;
     }
 
-    pub fn set_data_rate(&mut self, data_rate: u8) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn set_data_rate(&mut self, data_rate: u8) {
         self.m_config_reg1 &= !REG_CONFIG1_DR_MASK;
         self.m_config_reg1 |= data_rate;
-        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1)
+        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1).await;
     }
 
-    pub fn set_operation_mode(&mut self, mode: u8) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn set_operation_mode(&mut self, mode: u8) {
         self.m_config_reg1 &= !REG_CONFIG1_MODE_MASK;
         self.m_config_reg1 |= mode;
-        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1)
+        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1).await;
     }
 
-    pub fn set_conv_mode_single_shot(&mut self) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn set_conv_mode_single_shot(&mut self) {
         self.m_config_reg1 |= !(1 << (2));
-        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1)
+        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1).await;
     }
 
-    pub fn set_conv_mode_continuous(&mut self) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn set_conv_mode_continuous(&mut self) {
         self.m_config_reg1 |= 1 << (2);
-        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1)
+        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1).await;
     }
 
-    pub fn temp_sensor_mode_disable(&mut self) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn temp_sensor_mode_disable(&mut self) {
         self.m_config_reg1 &= !(1 << (1));
-        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1)
+        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1).await;
     }
 
-    pub fn temp_sensor_mode_enable(&mut self) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn temp_sensor_mode_enable(&mut self) {
         self.m_config_reg1 |= 1 << (1);
-        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1)
+        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1).await;
     }
 
-    pub fn current_sources_off(&mut self) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn current_sources_off(&mut self) {
         self.m_config_reg1 &= !(1 << (0));
-        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1)
+        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1).await;
     }
 
-    pub fn current_sources_on(&mut self) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn current_sources_on(&mut self) {
         self.m_config_reg1 |= 1 << (0);
-        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1)
+        self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1).await;
     }
 
-    pub fn set_vref(&mut self, vref: u8) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn set_vref(&mut self, vref: u8) {
         self.m_config_reg2 &= !REG_CONFIG2_VREF_MASK;
         self.m_config_reg2 |= vref;
-        self.write_register(CONFIG_REG2_ADDRESS, self.m_config_reg2)
+        self.write_register(CONFIG_REG2_ADDRESS, self.m_config_reg2).await;
     }
 
-    pub fn set_fir_filter(&mut self, filter: u8) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn set_fir_filter(&mut self, filter: u8) {
         self.m_config_reg2 &= !REG_CONFIG2_FIR_MASK;
         self.m_config_reg2 |= filter;
-        self.write_register(CONFIG_REG2_ADDRESS, self.m_config_reg2)
+        self.write_register(CONFIG_REG2_ADDRESS, self.m_config_reg2).await;
     }
 
-    pub fn low_side_switch_open(&mut self) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn low_side_switch_open(&mut self) {
         self.m_config_reg2 &= !(1 << (3));
-        self.write_register(CONFIG_REG2_ADDRESS, self.m_config_reg2)
+        self.write_register(CONFIG_REG2_ADDRESS, self.m_config_reg2).await;
     }
 
-    pub fn low_side_switch_closed(&mut self) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn low_side_switch_closed(&mut self) {
         self.m_config_reg2 |= 1 << (3);
-        self.write_register(CONFIG_REG2_ADDRESS, self.m_config_reg2)
+        self.write_register(CONFIG_REG2_ADDRESS, self.m_config_reg2).await;
     }
 
-    pub fn set_idac_current(&mut self, idac_current: u8) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn set_idac_current(&mut self, idac_current: u8) {
         self.m_config_reg2 &= !REG_CONFIG2_IDAC_CURRENT_MASK;
         self.m_config_reg2 |= idac_current;
-        self.write_register(CONFIG_REG2_ADDRESS, self.m_config_reg2)
+        self.write_register(CONFIG_REG2_ADDRESS, self.m_config_reg2).await;
     }
 
-    pub fn set_idac1_route(&mut self, idac1_routing: u8) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn set_idac1_route(&mut self, idac1_routing: u8) {
         self.m_config_reg3 &= !REG_CONFIG3_IDAC1_ROUTING_MASK;
         self.m_config_reg3 |= idac1_routing;
-        self.write_register(CONFIG_REG3_ADDRESS, self.m_config_reg3)
+        self.write_register(CONFIG_REG3_ADDRESS, self.m_config_reg3).await;
     }
 
-    pub fn set_idac2_route(&mut self, idac2_routing: u8) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn set_idac2_route(&mut self, idac2_routing: u8) {
         self.m_config_reg3 &= !REG_CONFIG3_IDAC2_ROUTING_MASK;
         self.m_config_reg3 |= idac2_routing;
-        self.write_register(CONFIG_REG3_ADDRESS, self.m_config_reg3)
+        self.write_register(CONFIG_REG3_ADDRESS, self.m_config_reg3).await;
     }
 
-    pub fn set_drdy_mode_default(&mut self) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn set_drdy_mode_default(&mut self) {
         self.m_config_reg3 &= !(1 << (3));
-        self.write_register(CONFIG_REG3_ADDRESS, self.m_config_reg3)
+        self.write_register(CONFIG_REG3_ADDRESS, self.m_config_reg3).await;
     }
 
-    pub fn set_drdy_mode_dout(&mut self) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn set_drdy_mode_dout(&mut self) {
         self.m_config_reg3 |= 1 << (3);
-        self.write_register(CONFIG_REG3_ADDRESS, self.m_config_reg3)
+        self.write_register(CONFIG_REG3_ADDRESS, self.m_config_reg3).await;
     }
 
-    pub fn set_internal_reference(&mut self) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn set_internal_reference(&mut self) {
         self.m_config_reg2 &= !VREF_MASK;
         self.m_config_reg2 |= VREF_INT;
-        self.write_register(CONFIG_REG2_ADDRESS, self.m_config_reg2)
+        self.write_register(CONFIG_REG2_ADDRESS, self.m_config_reg2).await;
     }
 
-    pub fn set_external_reference(&mut self) -> Result<(), ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn set_external_reference(&mut self) {
         self.m_config_reg2 &= !VREF_MASK;
         self.m_config_reg2 |= VREF_EXT;
-        self.write_register(CONFIG_REG2_ADDRESS, self.m_config_reg2)
+        self.write_register(CONFIG_REG2_ADDRESS, self.m_config_reg2).await;
     }
 
-    pub fn get_config_reg(&mut self) -> Result<[u8; 4], ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
-        self.m_config_reg0 = self.read_register(CONFIG_REG0_ADDRESS)?;
-        self.m_config_reg1 = self.read_register(CONFIG_REG1_ADDRESS)?;
-        self.m_config_reg2 = self.read_register(CONFIG_REG2_ADDRESS)?;
-        self.m_config_reg3 = self.read_register(CONFIG_REG3_ADDRESS)?;
+    pub async fn get_config_reg(&mut self) -> [u8; 4] {
+        self.m_config_reg0 = self.read_register(CONFIG_REG0_ADDRESS).await;
+        self.m_config_reg1 = self.read_register(CONFIG_REG1_ADDRESS).await;
+        self.m_config_reg2 = self.read_register(CONFIG_REG2_ADDRESS).await;
+        self.m_config_reg3 = self.read_register(CONFIG_REG3_ADDRESS).await;
 
-        Ok([
+        [
             self.m_config_reg0,
             self.m_config_reg1,
             self.m_config_reg2,
             self.m_config_reg3
-        ])
+        ]
     }
 
-    pub fn wait_for_data(&mut self, delay: &mut dyn DelayNs, mut timeout_ms: u64) -> bool {
-        while self.dr.is_high().unwrap() {
+    /*
+    pub async fn wait_for_data(&mut self, mut timeout_ms: u64) -> bool {
+        while self.data_ready.is_high().unwrap() {
             if timeout_ms > 0 {
-                delay.delay_ms(1);
+                self.spi.transaction(&mut [Operation::DelayNs(1000000)]).await.unwrap();
                 timeout_ms -= 1;
             } else {
                 return false;
             }
         }
         true
-    }
+    }*/
 
-    pub fn read_data(&mut self) -> Result<[u8; 3], ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
+    pub async fn read_data(&mut self) -> [u8; 3] {
         let mut buf: [u8; 3] = [0x00; 3];
-        self.spi.read(&mut buf).map_err(ADS1220Error::Spi)?;
-        Ok(buf)
+        self.spi.read(&mut buf).await.ok();
+        buf
     }
 
     pub fn data_to_int(&mut self, data: [u8; 3]) -> i32 {
-        let mut result: i32;
-        result = data[0] as i32;
-        result = (result << 8) | data[1] as i32;
-        result = (result << 8) | data[2] as i32;
+        let mut result: u32;
+        result = data[0] as u32;
+        result = (result << 8) | data[1] as u32;
+        result = (result << 8) | data[2] as u32;
 
         if (data[0] & (1 << 7)) == 0 {
-            result |= 0xFF000000u32 as i32;
+            result |= 0xFF000000u32;
         }
-        result
+        result as i32
     }
 
-    pub fn read_wait_for_data(&mut self, delay: &mut dyn DelayNs) -> Result<i32, ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
-        if !self.wait_for_data(delay, 60) {
-            return Ok(0);
+    /*pub async fn read_wait_for_data(&mut self) -> [u8; 3] {
+        if !self.wait_for_data(60).await {
+            return [0x00; 3];
         }
-        self.read_data().map(|t| self.data_to_int(t))
-    }
+        let data = self.read_data().await;
+        // self.data_to_int(data)
+        data
+    }*/
 
-    pub fn read_data_samples(&mut self) -> Result<i32, ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
-        let mut buf: [u8; 3] = [0x00; 3];
-        let result: i32;
-        let mut bit24: i32;
+    pub async fn read_data_samples(&mut self) -> [u8; 3] {
+        let mut buf: [u8; 3] = [SPI_MASTER_DUMMY; 3];
+        // let result: i32;
+        // let mut bit24: i32;
 
-        self.spi.read(&mut buf).map_err(ADS1220Error::Spi)?;
+        self.spi.transfer_in_place(buf.as_mut_slice()).await.unwrap();
 
-        bit24 = buf[0] as i32;
-        bit24 = (bit24 << 8) | buf[1] as i32;
-        bit24 = (bit24 << 8) | buf[2] as i32;
+        /*bit24 = buf[0] as i32;
+        bit24 = (bit24 << 8) | (buf[1] as i32);
+        bit24 = (bit24 << 8) | (buf[2] as i32);
         bit24 = bit24 << 8;
-        result = bit24 >> 8;
-        Ok(result)
+        result = bit24 >> 8;*/
+        buf
     }
 
-    pub fn read_single_shot(&mut self) -> Result<i32, ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
-        self.start_conv()?;
-        self.read_data().map(|t| self.data_to_int(t))
+    pub async fn read_single_shot(&mut self) -> i32 {
+        self.start_conv().await;
+        let data = self.read_data().await;
+        self.data_to_int(data)
     }
 
-    pub fn read_single_shot_wait_for_data(&mut self, delay: &mut dyn DelayNs) -> Result<i32, ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
-        self.start_conv()?;
-        self.read_wait_for_data(delay)
+    /*pub async fn read_single_shot_wait_for_data(&mut self) -> [u8; 3] {
+        self.start_conv().await;
+        self.read_wait_for_data().await
+    }*/
+
+    pub async fn read_single_shot_single_ended(&mut self, channels_conf: u8) -> i32 {
+        self.select_mux_channels(channels_conf).await;
+        self.read_single_shot().await
     }
 
-    pub fn read_single_shot_single_ended(&mut self, channels_conf: u8) -> Result<i32, ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
-        self.select_mux_channels(channels_conf)?;
-        self.read_single_shot()
-    }
+    /*pub async fn read_single_shot_single_ended_wait_for_data(&mut self, channels_conf: u8) -> [u8; 3] {
+        self.select_mux_channels(channels_conf).await;
+        self.read_single_shot_wait_for_data().await
+    }*/
 
-    pub fn read_single_shot_single_ended_wait_for_data(&mut self, delay: &mut dyn DelayNs, channels_conf: u8) -> Result<i32, ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
-        self.select_mux_channels(channels_conf)?;
-        self.read_single_shot_wait_for_data(delay)
-    }
+    /*pub fn data_ready(&mut self) -> bool {
+        self.data_ready.is_low().unwrap()
+    }*/
 
-    pub fn data_ready(&mut self) -> Result<bool, ADS1220Error<SPI::Error, <DR as ErrorType>::Error>> {
-        self.dr.is_low().map_err(ADS1220Error::Dr)
-    }
-
-    #[cfg(feature = "defmt")]
+    /*#[cfg(feature = "defmt")]
     pub fn status(&mut self) {
         // let current_time: Instant = Instant::now();
-        let ready = self.data_ready().unwrap();
+        let ready = self.data_ready();
         let pending = if ready { BYTES_PER_SAMPLE } else { 0 };
         debug!("ads1220 status: ready={}, pending_bytes={:#X}", ready, pending)
-    }
+    }*/
 }
