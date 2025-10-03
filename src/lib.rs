@@ -139,7 +139,7 @@ impl<SPI: SpiDevice> ADS1220<SPI> {
     pub async fn read_register(&mut self, address: u8) -> u8 {
         let mut result: [u8; 1] = [0x00];
         self.spi.write(&[RREG | (address << 2)]).await.ok();
-        self.spi.transfer(&mut result, &[SPI_MASTER_DUMMY]).await.ok();
+        self.spi.read(&mut result).await.ok();
         result[0]
     }
 
