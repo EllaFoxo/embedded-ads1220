@@ -202,7 +202,7 @@ impl<SPI: SpiDevice> ADS1220<SPI> {
     }
 
     pub async fn pga_off(&mut self) {
-        self.m_config_reg0 |= !(1 << (0));
+        self.m_config_reg0 |= 1 << (0);
         self.write_register(CONFIG_REG0_ADDRESS, self.m_config_reg0).await;
     }
 
@@ -219,7 +219,7 @@ impl<SPI: SpiDevice> ADS1220<SPI> {
     }
 
     pub async fn set_conv_mode_single_shot(&mut self) {
-        self.m_config_reg1 |= !(1 << (2));
+        self.m_config_reg1 &= !(1 << (2));
         self.write_register(CONFIG_REG1_ADDRESS, self.m_config_reg1).await;
     }
 
